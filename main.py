@@ -1,129 +1,176 @@
-from agents import Agent, Runner
-from questionnaire import questionnaire
-
-# =======================
-# Main Controller Agent
-# =======================
-
-MAIN_CONTROLLER_INSTRUCTIONS = (
-    "You are the Main Controller for a company risk assessment chatbot. "
-    "You are provided with a predefined questionnaire divided into multiple domains. "
-    "Your role is to orchestrate the conversation as follows:\n"
-    "1. Present each question by calling the Question Agent.\n"
-    "2. Accept user responses that must begin with YES, NO, or NOT APPLICABLE (with optional additional context).\n"
-    "3. If the user asks for clarification, hand off that query to the Clarification Agent and then re-ask the original question.\n"
-    "4. Use a dedicated Routing Agent to determine if the input is valid, a clarification request, or off-topic.\n"
-    "5. Maintain deterministic, on-script behavior throughout the conversation.\n"
-    "Note: This prototype does not store responses or generate a final report; it focuses solely on interaction."
+from __future__ import annotations
+import asyncio
+import uuid
+from pydantic import BaseModel
+from agents import (
+    Agent,
+    Runner,
+    handoff,
+    trace,
+    TResponseInputItem,
+    MessageOutputItem,
+    HandoffOutputItem,
+    ItemHelpers,
 )
+from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+from questionnaire import questionnaire  # Expected to be a dict: {domain: [questions, ...]}
 
-main_controller = Agent(
+# -----------------------
+# Shared Context Model
+# -----------------------
+
+class RiskAssessmentContext(BaseModel):
+    current_domain: str | None = None
+    current_question: str | None = None
+    user_response: str | None = None
+
+# -----------------------
+# Agent Definitions
+# -----------------------
+
+# Main Controller: Orchestrates the conversation by delegating to specialized agents.
+main_controller = Agent[RiskAssessmentContext](
     name="MainController",
-    instructions=MAIN_CONTROLLER_INSTRUCTIONS
+    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+You are the Main Controller for a risk assessment chatbot. Your role is to coordinate the conversation.
+When a new question is to be asked, transfer control to the Question Agent.
+When a user answer is received that appears to be a clarification (for example, a question or a request for more details), 
+you will transfer control to the Clarification Agent.
+You will not hand over to the Clarification Agent until after the question has been asked and the user replies.
+After the Clarification Agent provides an explanation, re-ask the exact original question.
+Once a final answer is received (one that does not look like a clarification), record the answer and proceed to the next question.
+DO NOT CHANGE the current question in context at any point in the assessment.""",
+    handoffs=[],  # Set below.
 )
 
-# =======================
-# Routing Agent
-# =======================
-
-routing_agent = Agent(
-    name="RoutingAgent",
-    instructions=(
-        "You are the Routing Agent for a risk assessment chatbot. "
-        "Your task is to analyze user input and classify it as one of the following: "
-        "'valid' if the input is a valid answer (i.e., it begins with YES, NO, or NOT APPLICABLE, possibly with additional context), "
-        "'clarification' if the user is asking for more details or explanation (for example, if the input contains words like 'clarify', 'explain', or 'what do you mean'), "
-        "or 'off-topic' if the input does not conform to these expected responses. "
-        "Return only one of these words: valid, clarification, or off-topic."
-    )
-)
-
-# =======================
-# Question Agent
-# =======================
-
-question_agent = Agent(
+# Question Agent: Outputs the current question verbatim.
+question_agent = Agent[RiskAssessmentContext](
     name="QuestionAgent",
-    instructions=(
-        "You are the Question Agent. When provided with a risk assessment question as input, "
-        "output the question verbatim in a clear and concise manner. "
-        "Do not include any additional commentary or deviation from the original question."
-    )
+    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+You are the Question Agent. Your sole responsibility is to output exactly the current question stored in the context.
+Do not add, modify, or ask any additional questions. Simply output the exact text of the current question.
+WAIT for the user's answer; do not prompt or ask for clarification.
+After outputting the question, immediately transfer control back to the Main Controller.""",
+    handoffs=[handoff(agent=main_controller)]
 )
 
-# =======================
-# Clarification Agent
-# =======================
-
-clarification_agent = Agent(
+# Clarification Agent: Provides a concise explanation of the current question.
+clarification_agent = Agent[RiskAssessmentContext](
     name="ClarificationAgent",
-    instructions=(
-        "You are the Clarification Agent. When given a clarifying query, "
-        "provide a concise explanation about what the question is asking and any additional context that may help the user answer the question. "
-        "Make sure to use all provided context to improve clarity."
-    )
+    instructions=f"""{RECOMMENDED_PROMPT_PREFIX}
+You are the Clarification Agent. Using the user_response and the current_question from the context, provide a brief, clear explanation 
+of what the question is asking so the user can respond appropriately.
+DO NOT RETURN or modify the current question – simply explain it in simple language.
+After providing your explanation, immediately transfer control back to the Main Controller.""",
+    handoffs=[handoff(agent=main_controller)]
 )
 
-# =======================
+# Configure the Main Controller to hand off to the specialized agents.
+main_controller.handoffs = [
+    handoff(agent=question_agent),
+    handoff(agent=clarification_agent),
+]
+
+# -----------------------
+# Helper: Classify Answer
+# -----------------------
+
+def classify_answer(answer: str) -> str:
+    """
+    Returns "clarification" if the answer appears to be a clarifying question,
+    and "valid" otherwise.
+    """
+    answer = answer.strip().lower()
+    question_words = {"what", "why", "how", "when", "where", "which", "who"}
+    if "?" in answer:
+        return "clarification"
+    if answer.split() and answer.split()[0] in question_words:
+        return "clarification"
+    return "valid"
+
+# -----------------------
 # Main Conversation Loop
-# =======================
+# -----------------------
 
-def run_risk_assessment(questionnaire, question_agent, clarification_agent, routing_agent):
-    """
-    Orchestrates the risk assessment conversation.
-    
-    Parameters:
-      questionnaire: dict where each key is a domain and the value is a list of questions.
-      question_agent: Agent that asks the given question.
-      clarification_agent: Agent that provides clarifications when needed.
-      routing_agent: Agent that routes user inputs to determine their type.
-    """
-    for domain, questions in questionnaire.items():
-        print(f"\n--- Domain: {domain} ---")
-        for question in questions:
-            # Ask the question via the Question Agent.
-            q_result = Runner.run_sync(question_agent, question)
-            print("Question:", q_result.final_output, "\n")
-            
-            # Initialize clarification context for the current question.
-            clarification_context = ""
-            user_input = input("Your answer: ").strip()+ "\n"
-            
-            # Loop until a valid answer is provided.
-            while True:
-                # Use the Routing Agent to classify the input.
-                route_result = Runner.run_sync(routing_agent, user_input)
-                route_type = route_result.final_output.lower()  # expected: "valid", "clarification", or "off-topic"
-                
-                if route_type == "valid":
-                    break  # A valid answer was given.
-                elif route_type == "off-topic":
-                    print("REMINDER: Please answer with YES, NO, or NOT APPLICABLE, or ask for clarification if needed.", "\n")
-                    user_input = input("Now please provide your answer: ").strip()+ "\n"
-                elif route_type == "clarification":
-                    # Append the clarification request to accumulated context.
-                    if clarification_context:
-                        clarification_context += "\n" + user_input
-                    else:
-                        clarification_context = user_input
-                    # Build a prompt that includes the original question and the accumulated clarification context.
-                    clarification_prompt = f"Question: {question}\nClarification request: {clarification_context}"
-                    c_result = Runner.run_sync(clarification_agent, clarification_prompt)
-                    print("Clarification:", c_result.final_output)
-                    user_input = input("Now please provide your answer: ").strip()
-            
-            print("Answer accepted:", user_input, "\n")
-        
-        next_domain = input("Do you want to proceed to the next domain? (YES/NO): ").strip().upper()
-        if next_domain != "YES":
+async def run_question(domain: str, question: str):
+    # Create a fresh context for this question.
+    context = RiskAssessmentContext(
+        current_domain=domain,
+        current_question=question,
+        user_response=None,
+    )
+    conversation_id = uuid.uuid4().hex[:16]
+    current_agent = main_controller
+
+    # Step 1: Ask the question using the Question Agent.
+    # Use a fresh input with only the system message.
+    input_items = [{"content": context.current_question, "role": "system"}]
+    with trace("Risk Assessment", group_id=conversation_id):
+        result = await Runner.run(main_controller, input_items, context=context)
+    # Extract the output; if it doesn't match exactly the current question, override it.
+    asked_question = ""
+    for item in result.new_items:
+        if isinstance(item, MessageOutputItem):
+            asked_question = ItemHelpers.text_message_output(item).strip()
             break
+    if asked_question != context.current_question.strip():
+        # Override any extra output with the original question.
+        asked_question = context.current_question.strip()
+    print("Question:", asked_question)
+    for item in result.new_items:
+        if isinstance(item, HandoffOutputItem):
+            print(f"Handoff: {item.source_agent.name} -> {item.target_agent.name}")
+    # Ensure control returns to Main Controller.
+    current_agent = result.last_agent
 
-    print("\nRisk assessment conversation complete.")
+    # Step 2: Wait for the user's answer.
+    user_ans = input("Your answer: ").strip()
+    context.user_response = user_ans
+    classification = classify_answer(user_ans)
 
-# =======================
-# Example Usage
-# =======================
+    # Loop until a valid answer is received.
+    while classification == "clarification":
+        # Step 3: Trigger the Clarification Agent.
+        clar_prompt = f"Clarify the question: {context.current_question}\nUser asked: {user_ans}"
+        input_items = [{"content": clar_prompt, "role": "user"}]
+        with trace("Risk Assessment", group_id=conversation_id):
+            result = await Runner.run(main_controller, input_items, context=context)
+        for item in result.new_items:
+            if isinstance(item, MessageOutputItem):
+                print("Clarification:", ItemHelpers.text_message_output(item))
+            elif isinstance(item, HandoffOutputItem):
+                print(f"Handoff: {item.source_agent.name} -> {item.target_agent.name}")
+        # Step 4: Re-ask the original question exactly.
+        input_items = [{"content": context.current_question, "role": "system"}]
+        with trace("Risk Assessment", group_id=conversation_id):
+            result = await Runner.run(main_controller, input_items, context=context)
+        for item in result.new_items:
+            if isinstance(item, MessageOutputItem):
+                # Again, override any deviation.
+                asked_question = ItemHelpers.text_message_output(item).strip()
+                if asked_question != context.current_question.strip():
+                    asked_question = context.current_question.strip()
+                print("Question re-asked:", asked_question)
+            elif isinstance(item, HandoffOutputItem):
+                print(f"Handoff: {item.source_agent.name} -> {item.target_agent.name}")
+        # Step 5: Get a new answer.
+        user_ans = input("Your answer after clarification: ").strip()
+        context.user_response = user_ans
+        classification = classify_answer(user_ans)
+    
+    # Step 6: Accept the valid answer.
+    print("Answer accepted:", user_ans)
+    print("Final answer for question:", context.current_question, "->", context.user_response)
 
-if __name__ == "__main__":    
-    # Run the risk assessment process.
-    run_risk_assessment(questionnaire, question_agent, clarification_agent, routing_agent)
+async def main():
+    # Flatten the questionnaire into a list of (domain, question) pairs.
+    questions_list = []
+    for domain, qs in questionnaire.items():
+        for q in qs:
+            questions_list.append((domain, q))
+    for domain, q in questions_list:
+        await run_question(domain, q)
+        print()  # Blank line for readability.
+
+if __name__ == "__main__":
+    asyncio.run(main())
