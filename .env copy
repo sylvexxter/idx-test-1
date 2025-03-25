@@ -1,0 +1,2 @@
+#copy this file and save it as ".env" and then add your api key below
+OPENAI_API_KEY=""
