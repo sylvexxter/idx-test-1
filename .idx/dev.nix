@@ -14,7 +14,11 @@
   ];
 
   # Sets environment variables in the workspace
-  env = {};
+  env = {
+    #enter the API KEY HERE and make sure that you do not update it in the github if you do push
+    OPENAI_API_KEY="";
+  };
+
   idx = {
     # Search for the extensions you want on https://open-vsx.org/ and use "publisher.id"
     extensions = [

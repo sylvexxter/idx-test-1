@@ -1,2 +1,2 @@
-#copy this file and save it as ".env" and then add your api key below
-OPENAI_API_KEY=""
+#enter your OPENAI_API_KEY in the dev.nix file if you are opening this on project idx
+
