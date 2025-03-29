@@ -1,0 +1,9 @@
+openai>=1.1.0
+agents>=0.0.7  # Using agents instead of openai-agents for better compatibility
+numpy>=1.22.0
+sounddevice>=0.4.5
+simpleaudio>=1.0.4  # Using simpleaudio instead of pyaudio for easier installation
+python-dotenv>=0.19.0
+websockets>=10.0
+pydantic>=1.10.0
+scipy>=1.10.0  # Added for audio signal processing and filtering 
